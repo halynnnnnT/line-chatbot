@@ -1,10 +1,6 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
-# from langchain.chat_models import ChatOpenAI
-from langchain_openai import ChatOpenAI
-
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+import google.generativeai as genai
 import sqlite3
 import os
 from dotenv import load_dotenv
@@ -14,6 +10,7 @@ from linebot.v3 import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.exceptions import InvalidSignatureError
+import json
 
 # Load environment variables
 load_dotenv()
@@ -23,19 +20,18 @@ app = Flask(__name__)
 # 新增 LINE 的 handler 設定
 line_config = Configuration(access_token=os.getenv("YOUR_CHANNEL_ACCESS_TOKEN"))
 line_handler = WebhookHandler(os.getenv("YOUR_CHANNEL_SECRET"))
-# === Setup OpenAI ===
-llm = ChatOpenAI(temperature=0.2, model="gpt-3.5-turbo", openai_api_key=os.getenv("OPENAI_API_KEY"))
 
-prompt = PromptTemplate(
-    input_variables=["input"],
-    template="""
-你是一個記帳助理，請從下列訊息中抽取出：品項、金額、分類，並自動填入今天日期。
+# === Setup Gemini API ===
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-pro')
+
+def generate_expense_json(user_input):
+    prompt = f"""你是一個記帳助理，請從下列訊息中抽取出：品項、金額、分類，並自動填入今天的日期。
 輸出 JSON 格式：{{"date": ..., "item": ..., "amount": ..., "category": ...}}
-訊息：{input}
+訊息：{user_input}
 """
-)
-
-chain = LLMChain(llm=llm, prompt=prompt)
+    response = model.generate_content(prompt)
+    return response.text
 
 # === Setup SQLite ===
 def init_db():
@@ -58,23 +54,30 @@ init_db()
 def record():
     user_input = request.json.get("message")
 
-    result = chain.run(user_input)
+    result = generate_expense_json(user_input)
     try:
-        data = eval(result)  # ⚠️ 建議改為 json.loads 如用 format 推理方式
-    except:
-        return jsonify({"error": "LLM 無法正確解析輸出。", "raw": result}), 400
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Gemini API 無法正確解析輸出。", "raw": result}), 400
 
-    if data["date"] == "今天":
+    if data.get("date") == "今天":
         data["date"] = datetime.today().strftime("%Y-%m-%d")
 
     conn = sqlite3.connect("expenses.db")
     c = conn.cursor()
-    c.execute("INSERT INTO expenses (date, item, amount, category) VALUES (?, ?, ?, ?)",
-              (data["date"], data["item"], data["amount"], data["category"]))
-    conn.commit()
-    conn.close()
+    try:
+        c.execute("INSERT INTO expenses (date, item, amount, category) VALUES (?, ?, ?, ?)",
+                  (data["date"], data["item"], data["amount"], data["category"]))
+        conn.commit()
+        status = "記錄成功"
+    except Exception as e:
+        conn.rollback()
+        status = f"記錄失敗：{str(e)}"
+        data = None
+    finally:
+        conn.close()
 
-    return jsonify({"status": "記錄成功", "data": data})
+    return jsonify({"status": status, "data": data})
 
 # === 查看資料用 ===
 @app.route("/list", methods=["GET"])
@@ -100,24 +103,28 @@ def callback():
 @line_handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_input = event.message.text
-    result = chain.run(user_input)
+    result = generate_expense_json(user_input)
 
     try:
-        data = eval(result)
-    except:
+        data = json.loads(result)
+    except json.JSONDecodeError:
         reply_text = "抱歉，我無法理解這筆記帳訊息。"
     else:
-        if data["date"] == "今天":
+        if data.get("date") == "今天":
             data["date"] = datetime.today().strftime("%Y-%m-%d")
 
         conn = sqlite3.connect("expenses.db")
         c = conn.cursor()
-        c.execute("INSERT INTO expenses (date, item, amount, category) VALUES (?, ?, ?, ?)",
-                  (data["date"], data["item"], data["amount"], data["category"]))
-        conn.commit()
-        conn.close()
-
-        reply_text = f"已記錄：{data['item']} {data['amount']} 元（{data['category']}）"
+        try:
+            c.execute("INSERT INTO expenses (date, item, amount, category) VALUES (?, ?, ?, ?)",
+                      (data["date"], data["item"], data["amount"], data["category"]))
+            conn.commit()
+            reply_text = f"已記錄：{data.get('item', '未知')} {data.get('amount', '未知')} 元（{data.get('category', '未知')}）"
+        except Exception as e:
+            conn.rollback()
+            reply_text = f"記錄失敗，請稍後再試。錯誤訊息：{str(e)}"
+        finally:
+            conn.close()
 
     # 回覆 LINE 使用者
     with ApiClient(line_config) as api_client:
