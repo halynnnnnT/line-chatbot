@@ -8,7 +8,10 @@ from langchain.chains import LLMChain
 import sqlite3
 import os
 from dotenv import load_dotenv
-from linebot.v3.webhooks import WebhookHandler, MessageEvent, TextMessageContent
+from linebot.v3 import (
+    WebhookHandler
+)
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.exceptions import InvalidSignatureError
 
