@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
-from langchain.chat_models import ChatOpenAI
+# from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
+
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 import sqlite3
